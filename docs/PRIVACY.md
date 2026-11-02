@@ -7,3 +7,7 @@ CClip 在本机保存工程、设置、原片副本、字幕与生成文件。�
 本版默认关闭使用统计和崩溃上报，不包含账号投稿或定时发布。保留的上游遥测兼容代码及测试不表示 CClip 开启这些服务。ChatGPT 订阅登录不能直接充当本工具的图像 API。
 
 请勿把真实密钥、Cookie、私人视频、字幕或含个人路径的日志提交到公开仓库。报告问题时使用合成示例和脱敏日志。联系入口见 [问题反馈](https://github.com/georgewithtaylor-dev/CClip/issues) 与 [安全说明](../SECURITY.md)。
+
+## 上游安装器兼容说明
+
+源码保留上游 Windows 安装器，CClip 本版免安装 ZIP 不使用它。该安装器的数据目录为 `%APPDATA%\AutoClip`，卸载勾选项为“同时删除 AutoClip 数据（项目、设置、API 密钥）”；静默参数 `/DELETEAPPDATA` 也会请求删除该上游目录。不要将其与 CClip 的项目目录或临时缓存清理混淆。
