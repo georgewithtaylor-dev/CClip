@@ -1,0 +1,7 @@
+{
+  "identifier": "cclip",
+  "description": "CClip's own loopback application page and native downloads",
+  "windows": ["main"],
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["core:default", "shell:allow-open", "process:default"]
+}

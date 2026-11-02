@@ -1,0 +1,43 @@
+name: I18n Documentation Sync
+
+on:
+  push:
+    paths:
+      - 'README*.md'
+      - '.github/README*.md'
+      - 'docs/**'
+      - 'DOCKER.md'
+      - 'CONTRIBUTING.md'
+      - 'CHANGELOG.md'
+      - 'LICENSE'
+      - 'skills/autoclip/SKILL.md'
+      - 'src-tauri/icons/128x128.png'
+      - 'scripts/check_readmes.py'
+      - '.github/workflows/i18n-sync.yml'
+  pull_request:
+    paths:
+      - 'README*.md'
+      - '.github/README*.md'
+      - 'docs/**'
+      - 'DOCKER.md'
+      - 'CONTRIBUTING.md'
+      - 'CHANGELOG.md'
+      - 'LICENSE'
+      - 'skills/autoclip/SKILL.md'
+      - 'src-tauri/icons/128x128.png'
+      - 'scripts/check_readmes.py'
+      - '.github/workflows/i18n-sync.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check-readmes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check all eight README translations
+        run: python scripts/check_readmes.py

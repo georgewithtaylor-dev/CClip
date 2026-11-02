@@ -1,0 +1,212 @@
+"""
+统一的后端应用工厂函数
+支持 web 和 desktop 两种模式
+"""
+import logging
+import os
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from backend import __version__
+from backend.api.v1 import api_router
+from backend.api.v1.health import router as health_router
+from backend.core.database import engine
+from backend.models.base import Base
+from backend.core.config import get_logging_config, get_api_key
+from backend.core.error_middleware import global_exception_handler
+from backend.core.local_origin_guard import LocalOriginGuard, allowed_origins
+
+logger = logging.getLogger(__name__)
+
+def create_app(mode: str = "web", *, telemetry: bool = True) -> FastAPI:
+    """
+    创建 FastAPI 应用实例
+    
+    Args:
+        mode: 运行模式，支持 "web" 或 "desktop"
+    """
+    # 设置模式环境变量
+    os.environ["AUTOCLIP_MODE"] = mode
+
+    if mode == "desktop":
+        from backend.core.windows_asyncio import install_windows_proactor_cleanup
+        install_windows_proactor_cleanup()
+
+    if telemetry:
+        try:
+            from backend.core.sentry_setup import init_sentry
+            init_sentry(mode)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Sentry 初始化失败（忽略）: {e}")
+    
+    # 配置日志
+    logging_config = get_logging_config()
+    logging.basicConfig(
+        level=getattr(logging, logging_config["level"]),
+        format=logging_config["format"],
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(logging_config["file"])
+        ]
+    )
+    
+    # 创建 FastAPI 应用
+    app = FastAPI(
+        title="AutoClip API",
+        description="AI视频切片处理API",
+        version=__version__,
+        docs_url="/docs",
+        redoc_url="/redoc"
+    )
+    
+    # 设置应用状态
+    app.state.mode = mode
+    
+    # 来源守卫在内、CORS 在外：预检由 CORS 应答，其他网页的写请求由守卫拦下。
+    # 以前是 allow_origins=["*"] + allow_credentials，任意网页都能读设置里的 API Key。
+    origins = allowed_origins()
+    app.add_middleware(LocalOriginGuard, origins=origins, enforce_local_host=(mode == "desktop"))
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # 注册全局异常处理器
+    app.add_exception_handler(Exception, global_exception_handler)
+    
+    # 启动事件
+    @app.on_event("startup")
+    async def startup_event():
+        logger.info(f"启动 AutoClip API 服务 (模式: {mode})...")
+        
+        # 导入所有模型以确保表被创建
+        from backend.models.bilibili import BilibiliAccount, UploadRecord
+        Base.metadata.create_all(bind=engine)
+        logger.info("数据库表创建完成")
+        try:
+            from backend.core.project_enum_migration import normalize_legacy_project_enums
+            changed = normalize_legacy_project_enums(engine)
+            if changed:
+                logger.info("已将 %s 条项目记录中的旧枚举值改写为当前版本可识别的值", changed)
+        except Exception:
+            logger.exception("清洗项目枚举旧值失败，列表读取会使用降级值")
+        try:
+            # 上次进程被结束时还在跑的 Studio 任务不会再继续：标为失败并写明原因（RC156 #13）
+            from backend.services.studio.restart_recovery import reconcile_interrupted_projects
+            reconcile_interrupted_projects()
+        except Exception:
+            logger.exception("Studio 重启恢复失败，打开项目时会再次尝试")
+        try:
+            # 只清 projects 根下、库里没有对应行的残留目录；库读失败则什么都不删（RC156 PR4）
+            from backend.services.project_orphan_cleanup import cleanup_orphan_project_directories
+            cleanup_orphan_project_directories()
+        except Exception:
+            logger.exception("清理无数据库行的残留项目目录失败")
+        
+        # 加载 API 密钥到环境变量
+        api_key = get_api_key()
+        if api_key:
+            os.environ["DASHSCOPE_API_KEY"] = api_key
+            logger.info("API 密钥已加载到环境变量")
+        else:
+            logger.warning("未找到 API 密钥配置")
+        
+        # 根据模式进行不同的初始化
+        if mode == "desktop":
+            logger.info("桌面模式：使用本地队列和 SQLite")
+        else:
+            logger.info("Web 模式：使用 Redis/Celery")
+        
+        logger.info("WebSocket 网关服务已禁用，使用新的简化进度系统")
+    
+    # 关闭事件
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        logger.info("正在关闭 AutoClip API 服务...")
+        from backend.services import child_guard
+        child_guard.kill_all()
+        logger.info("WebSocket 网关服务已禁用")
+    
+    # 注册路由
+    app.include_router(health_router, prefix="/api/health", tags=["health"])
+    app.include_router(api_router, prefix="/api/v1")
+    
+    # 添加 video-categories 路由（统一到 api_router 中）
+    @app.get("/api/v1/video-categories")
+    async def get_video_categories():
+        """获取视频分类配置."""
+        return {
+            "categories": [
+                {
+                    "value": "default",
+                    "name": "默认",
+                    "description": "通用视频内容处理",
+                    "icon": "🎬",
+                    "color": "#4facfe"
+                },
+                {
+                    "value": "knowledge",
+                    "name": "知识科普",
+                    "description": "科学、技术、历史、文化等知识类内容",
+                    "icon": "📚",
+                    "color": "#52c41a"
+                },
+                {
+                    "value": "entertainment",
+                    "name": "娱乐",
+                    "description": "游戏、音乐、电影等娱乐内容",
+                    "icon": "🎮",
+                    "color": "#722ed1"
+                },
+                {
+                    "value": "business",
+                    "name": "商业",
+                    "description": "商业、创业、投资等商业内容",
+                    "icon": "💼",
+                    "color": "#fa8c16"
+                },
+                {
+                    "value": "experience",
+                    "name": "经验分享",
+                    "description": "个人经历、生活感悟等经验内容",
+                    "icon": "🌟",
+                    "color": "#eb2f96"
+                },
+                {
+                    "value": "opinion",
+                    "name": "观点评论",
+                    "description": "时事评论、观点分析等评论内容",
+                    "icon": "💭",
+                    "color": "#13c2c2"
+                },
+                {
+                    "value": "speech",
+                    "name": "演讲",
+                    "description": "公开演讲、讲座等演讲内容",
+                    "icon": "🎤",
+                    "color": "#f5222d"
+                }
+            ],
+            "default_category": "default"
+        }
+    
+    # 根健康检查
+    @app.get("/health")
+    async def root_health():
+        try:
+            return {
+                "status": "ok",
+                "mode": mode,
+                "version": __version__
+            }
+        except Exception as e:
+            return JSONResponse(
+                status_code=500, 
+                content={"status": "error", "detail": str(e)}
+            )
+    
+    return app

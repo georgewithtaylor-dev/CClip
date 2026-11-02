@@ -1,0 +1,72 @@
+name: 🐛 Bug 报告 / Bug report
+description: 某个功能不工作、报错、崩溃 / Something is broken
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。填完下面的信息，我们才能复现问题；缺少版本 / 平台 / 模型的 issue 会被要求补充后再处理。
+        Thanks for reporting. Version, platform and model are required for us to reproduce.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台 / Platform
+      options:
+        - macOS 桌面版 (Intel)
+        - macOS 桌面版 (Apple Silicon)
+        - Windows 桌面版 (x64)
+        - Docker
+        - 源码运行 / From source
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: AutoClip 版本 / Version
+      description: 填写实际安装版本；源码用户附提交 SHA / Installed version, or commit SHA for source builds
+      placeholder: "vX.Y.Z；源码附 commit SHA / include commit SHA for source"
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: 相关模型 / Relevant models
+      description: 分析服务与具体型号；转写问题附 Whisper / SenseVoice 型号。尚未配置或不相关可注明 / Provider and model; include transcription model when relevant
+      placeholder: "分析：服务商 + 型号；转写：Whisper / SenseVoice / 不相关"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: 视频来源 / Video source
+      options:
+        - B站链接 / Bilibili
+        - YouTube
+        - 本地文件 / Local file
+        - 不相关 / N/A
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么 / What happened
+      description: 做了什么操作、期望看到什么、实际看到什么 / Steps, expected, actual
+      placeholder: |
+        1. 粘贴链接 https://…
+        2. 点击「开始」
+        3. 进度停在「分析中 63%」不动 / 报错 xxx
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图 / Logs or screenshots
+      description: |
+        桌面版日志位置：macOS `~/Library/Application Support/AutoClip/logs`，Windows `%APPDATA%\AutoClip\logs`。粘贴失败前后相关日志即可，删除 API Key、Cookie、邮箱、私人路径与素材内容。Docker/源码用户请注明运行方式与日志来源。安全问题按 SECURITY.md 私下联系。
+      render: text

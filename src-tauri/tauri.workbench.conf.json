@@ -1,0 +1,30 @@
+{
+  "productName": "CClip",
+  "mainBinaryName": "CClip",
+  "identifier": "com.cclip.workbench",
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": null,
+    "beforeBuildCommand": "",
+    "frontendDist": "../frontend/dist-cclip"
+  },
+  "app": {
+    "windows": [],
+    "security": { "csp": null, "capabilities": ["cclip"] }
+  },
+  "bundle": {
+    "category": "Video",
+    "icon": ["icons/cclip/32x32.png", "icons/cclip/128x128.png", "icons/cclip/128x128@2x.png", "icons/cclip/icon.icns", "icons/cclip/icon.ico"],
+    "shortDescription": "本地直播录播切片剪辑工具",
+    "longDescription": "保留 AutoClip 原有创作流程的本地视频工具，支持 AI 选片、完整时间轴精剪、字幕、封面和多平台输出。",
+    "copyright": "CClip contributors; includes AutoClip under the MIT License",
+    "resources": ["resources/"],
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "nsis": {
+        "installerHooks": null,
+        "customLanguageFiles": null
+      }
+    }
+  }
+}

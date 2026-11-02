@@ -1,0 +1,82 @@
+"""Cost boundaries at the real import/confirmation endpoints, without paid calls."""
+import pytest
+from backend.tests.test_studio import root, source, client
+from backend.services.studio import analysis_preferences as ap, intelligence, jobs, planning, store
+from backend.services.studio.models import ImportOptions
+
+
+@pytest.fixture(autouse=True)
+def full_length_synthetic_source(monkeypatch):
+    # The shared `source` fixture is a 3 s clip standing in for a normal-length video. The
+    # too-short precheck (RC156 Win QA #10) has its own tests in test_media_precheck.py.
+    from backend.pipeline import media_precheck
+    monkeypatch.setattr(media_precheck, 'too_short', lambda duration: False)
+
+
+class Immediate:
+    def submit(self, fn, *args, **kwargs):
+        fn(*args, **kwargs)
+
+@pytest.mark.parametrize('mode', ['subtitle', 'auto', 'visual'])
+@pytest.mark.parametrize('configured', [False, True])
+@pytest.mark.parametrize('subtitles', [False, True])
+def test_unapproved_screening_never_calls_vision(source, monkeypatch, mode, configured, subtitles):
+    # 用户明确关闭了视觉初筛（字幕模式本身就是关闭）
+    monkeypatch.setattr(ap, 'load', lambda: ap.AnalysisPreferences(analysis_mode=mode, allow_visual_screening=False))
+    monkeypatch.setattr(intelligence, 'ready', lambda: configured)
+    monkeypatch.setattr(intelligence, 'vision_call', lambda *a, **k: pytest.fail('unapproved vision call'))
+    if subtitles:
+        (source.parent / 'input.srt').write_text('1\n00:00:00,000 --> 00:00:01,000\nHello\n')
+    result = planning.recommend(source, ImportOptions())
+    assert result['mode'] != 'ai'
+    assert result['analysis_preferences']['allow_visual_screening'] is False
+
+
+def test_subtitle_confirm_uses_only_old_pipeline_and_freezes_route(client, source, monkeypatch):
+    monkeypatch.setattr(ap, 'load', lambda: ap.AnalysisPreferences(analysis_mode='subtitle'))
+    monkeypatch.setattr(intelligence, 'ready', lambda: True)
+    monkeypatch.setattr(intelligence, 'vision_call', lambda *a, **k: pytest.fail('vision forbidden'))
+    monkeypatch.setattr(jobs, 'analyze', lambda *a, **k: pytest.fail('visual analysis forbidden'))
+    monkeypatch.setattr(jobs, 'executor', Immediate())
+    calls = []
+    monkeypatch.setattr(jobs, 'run_content', lambda *a: calls.append(a))
+    response = client.post('/studio/import', files={'video': ('source.mp4', source.read_bytes(), 'video/mp4')})
+    assert response.status_code == 200
+    pid = response.json()['project_id']
+    state = store.read(pid)
+    assert not calls and state['analysis']['status'] == 'awaiting_confirmation'
+    # Changing global settings cannot upgrade an already screened plan.
+    monkeypatch.setattr(ap, 'load', lambda: ap.AnalysisPreferences(analysis_mode='visual'))
+    rejected = client.post(f'/studio/{pid}/start', json={'plan_id':state['plan']['id'], 'goals':['content'], 'analysis_mode':'visual'})
+    assert rejected.status_code == 422
+    assert store.read(pid)['analysis']['status'] == 'awaiting_confirmation'
+    accepted = client.post(f'/studio/{pid}/start', json={'plan_id':state['plan']['id'], 'goals':['content']})
+    assert accepted.status_code == 200 and len(calls) == 1
+    assert store.read(pid)['plan']['confirmed_analysis'] == 'subtitle'
+
+
+def test_settings_api_strict_contract(client):
+    # 没保存过：默认智能选择，并随之允许导入时看几张画面（仍需多模态模型）
+    default = client.get('/studio/analysis-preferences').json()
+    assert default == {'analysis_mode': 'auto', 'allow_visual_screening': True}
+    assert client.put('/studio/analysis-preferences', json={'analysis_mode':'subtitle','allow_visual_screening':True}).status_code == 422
+    assert client.put('/studio/analysis-preferences', json={'analysis_mode':'invented'}).status_code == 422
+    assert client.put('/studio/analysis-preferences', json={'analysis_mode':'auto','allow_visual_screening':True}).status_code == 200
+    assert client.get('/studio/analysis-preferences').json()['allow_visual_screening'] is True
+
+
+def test_analysis_preferences_put_visual_survives_model_settings(client):
+    """Mac QA W157: preferences PUT must update ai-model-settings so GET does not snap back to auto."""
+    from backend.services import ai_model_settings as ai
+    ai.save(ai.ModelSettings(
+        connections=[ai.Connection(id='one', name='A', provider='openai',
+                                   base_url='https://example/v1', api_key='sk-test')],
+        analysis=ai.Assignment(connection_id='one', model='vision', capability='multimodal'),
+        analysis_mode='auto', allow_visual_screening=True,
+    ))
+    assert client.get('/studio/analysis-preferences').json()['analysis_mode'] == 'auto'
+    put = client.put('/studio/analysis-preferences',
+                     json={'analysis_mode': 'visual', 'allow_visual_screening': True})
+    assert put.status_code == 200 and put.json()['analysis_mode'] == 'visual'
+    assert client.get('/studio/analysis-preferences').json()['analysis_mode'] == 'visual'
+    assert ai.load().analysis_mode == 'visual'

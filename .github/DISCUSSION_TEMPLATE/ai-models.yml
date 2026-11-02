@@ -1,0 +1,32 @@
+title: "希望支持模型："
+body:
+  - type: markdown
+    attributes:
+      value: |
+        说明你要的模型或供应商，以及用途：分析、视觉、封面或字幕转写。当前支持与配置以[模型指南](https://github.com/zhouxiaoka/autoclip/blob/main/docs/AI_MODEL_CONFIGURATION.md)和设置页为准；本地转写包括 Whisper 与 SenseVoice。
+        只是「名单里没有这一项」、但兼容接口已经能填的，请在正文里写明，避免重复开需求。
+  - type: input
+    id: model
+    attributes:
+      label: 模型或供应商
+      placeholder: "服务商与具体型号；本地转写注明模型名称"
+    validations:
+      required: true
+  - type: dropdown
+    id: gap
+    attributes:
+      label: 现在差在哪
+      options:
+        - 设置里找不到这一项
+        - 能填兼容接口，但效果或报错有问题
+        - 希望有免费用的本地模型说明
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: 补充
+      description: 报错请先脱敏，移除 API Key、Cookie 和私人素材内容；可复现故障请使用 Bug 模板。
+    validations:
+      required: false

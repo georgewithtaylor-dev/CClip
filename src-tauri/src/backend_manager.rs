@@ -1,0 +1,484 @@
+use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader};
+use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendStatus {
+    pub is_running: bool,
+    pub port: u16,
+    pub pid: Option<u32>,
+    pub start_time: Option<u64>, // 改为u64以支持序列化
+}
+
+impl Default for BackendStatus {
+    fn default() -> Self {
+        Self {
+            is_running: false,
+            port: 8000,
+            pid: None,
+            start_time: None,
+        }
+    }
+}
+
+pub struct BackendManager {
+    status: Arc<Mutex<BackendStatus>>,
+    process: Arc<Mutex<Option<Child>>>,
+    #[cfg(windows)]
+    job: Mutex<Option<crate::windows_job::BackendJob>>,
+}
+
+struct BackendLaunch {
+    program: String,
+    args: Vec<String>,
+    working_dir: PathBuf,
+}
+
+impl BackendManager {
+    pub fn new() -> Self {
+        Self {
+            status: Arc::new(Mutex::new(BackendStatus::default())),
+            process: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            job: Mutex::new(None),
+        }
+    }
+
+    pub fn start(&self, app_handle: AppHandle) -> Result<(), String> {
+        let mut status = self.status.lock().unwrap();
+        if status.is_running {
+            return Err("后端服务已在运行".to_string());
+        }
+
+        // 启动后端服务
+        let launch = self.get_backend_launch(&app_handle)?;
+
+        let mut cmd = Command::new(&launch.program);
+        cmd.args(&launch.args)
+            .current_dir(&launch.working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("AUTOCLIP_DESKTOP_MODE", "true")
+            .env("AUTOCLIP_MODE", "desktop")
+            .env(
+                "AUTOCLIP_BUILD_ENVIRONMENT",
+                if cfg!(debug_assertions) { "development" } else { "production" },
+            )
+            // Keep signed bundle resources immutable, including Python startup imports.
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            // Single source of truth for the version the backend reports in /settings.
+            .env("AUTOCLIP_APP_VERSION", env!("CARGO_PKG_VERSION"))
+            // The backend exits when this process is gone, even after kill -9 or a crash
+            // (macOS has no Job Object; on Windows the job already covers it).
+            .env("AUTOCLIP_PARENT_PID", std::process::id().to_string());
+
+        // 崩溃上报：构建时若注入了 SENTRY_DSN，传给 Python 后端（未配置则为空，sentry_setup no-op）
+        if let Some(dsn) = option_env!("SENTRY_DSN") {
+            cmd.env("SENTRY_DSN", dsn);
+        }
+
+        // Point the backend at the bundled ffmpeg/ffprobe when present.
+        // The backend's ffmpeg_utils reads these env vars before falling back
+        // to PATH, so this is what makes video processing work on machines
+        // without a system ffmpeg installed.
+        let ffmpeg_bin = launch
+            .working_dir
+            .join("ffmpeg")
+            .join(Self::exe_name("ffmpeg"));
+        if ffmpeg_bin.is_file() {
+            cmd.env("AUTOCLIP_FFMPEG_PATH", &ffmpeg_bin);
+        }
+        let ffprobe_bin = launch
+            .working_dir
+            .join("ffmpeg")
+            .join(Self::exe_name("ffprobe"));
+        if ffprobe_bin.is_file() {
+            cmd.env("AUTOCLIP_FFPROBE_PATH", &ffprobe_bin);
+        }
+
+        // The backend prints emoji/Chinese to stdout; with a piped stdout on
+        // Windows Python falls back to the ANSI code page and dies with
+        // UnicodeEncodeError before it ever reaches "PORT=". Force UTF-8.
+        cmd.env("PYTHONUTF8", "1");
+        cmd.env("PYTHONIOENCODING", "utf-8");
+
+        // Backend defaults its data dir to ~/Library/Application Support/AutoClip,
+        // which only makes sense on macOS. Resolve the platform data dir here
+        // (%APPDATA%\AutoClip on Windows, ~/.local/share/AutoClip on Linux) —
+        // on macOS this is exactly the old default, so existing installs keep
+        // their data.
+        let app_dir = crate::telemetry_runtime::app_dir(app_handle.path().data_dir().ok());
+        crate::telemetry_runtime::configure_backend(&mut cmd, app_dir.as_deref());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            // Without this every launch pops a black console window for python.exe.
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        match cmd.spawn() {
+            #[allow(unused_mut)]
+            Ok(mut child) => {
+                #[cfg(windows)]
+                {
+                    // Own the complete process tree, including Celery/ffmpeg.
+                    // Closing the app handle (even on a crash) releases DLL locks.
+                    match crate::windows_job::BackendJob::attach(&child) {
+                        Ok(job) => *self.job.lock().unwrap() = Some(job),
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(format!("无法管理后端进程生命周期: {error}"));
+                        }
+                    }
+                }
+                let pid = child.id();
+                let start_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
+
+                // 启动时先设置为运行状态，但端口未知
+                *status = BackendStatus {
+                    is_running: true,
+                    port: 0, // 端口将在读取stdout后更新
+                    pid: Some(pid),
+                    start_time: Some(start_time),
+                };
+
+                let mut process = self.process.lock().unwrap();
+                *process = Some(child);
+
+                // 启动端口读取和健康检查
+                let status_clone = self.status.clone();
+                let process_clone = self.process.clone();
+                let app_handle_clone = app_handle.clone();
+
+                thread::spawn(move || {
+                    Self::read_port_and_health_check(status_clone, process_clone, app_handle_clone);
+                });
+
+                Ok(())
+            }
+            Err(e) => Err(format!("启动后端服务失败: {}", e)),
+        }
+    }
+
+    pub fn stop(&self) -> Result<(), String> {
+        let mut status = self.status.lock().unwrap();
+        let mut process = self.process.lock().unwrap();
+        #[cfg(windows)]
+        let terminated_tree = {
+            let job = self.job.lock().unwrap().take();
+            let owned = job.is_some();
+            drop(job);
+            owned
+        };
+        #[cfg(not(windows))]
+        let terminated_tree = false;
+        if let Some(mut child) = process.take() {
+            if !terminated_tree && child.try_wait().map_err(|e| e.to_string())?.is_none() {
+                if let Err(error) = child.kill() {
+                    // Retain ownership if termination failed so it can be retried.
+                    *process = Some(child);
+                    return Err(format!("停止后端服务失败: {error}"));
+                }
+            }
+            let _ = child.wait();
+        }
+
+        *status = BackendStatus::default();
+        Ok(())
+    }
+
+    pub fn restart(&self, app_handle: AppHandle) -> Result<(), String> {
+        // 先停止
+        if let Err(e) = self.stop() {
+            return Err(format!("停止后端服务失败: {}", e));
+        }
+
+        // 等待一秒
+        std::thread::sleep(Duration::from_secs(1));
+
+        // 再启动
+        self.start(app_handle)
+    }
+
+    pub fn get_status(&self) -> BackendStatus {
+        self.status.lock().unwrap().clone()
+    }
+
+    fn get_backend_launch(&self, app_handle: &AppHandle) -> Result<BackendLaunch, String> {
+        if let Ok(resource_path) = app_handle.path().resource_dir() {
+            for backend_work_dir in [resource_path.clone(), resource_path.join("resources")] {
+                for backend_binary in [
+                    backend_work_dir.join(Self::backend_binary_name()),
+                    backend_work_dir
+                        .join("autoclip-backend")
+                        .join(Self::backend_binary_name()),
+                ] {
+                    if backend_binary.is_file() {
+                        let working_dir = backend_binary
+                            .parent()
+                            .map(|path| path.to_path_buf())
+                            .unwrap_or_else(|| backend_work_dir.clone());
+                        return Ok(BackendLaunch {
+                            program: backend_binary.to_string_lossy().to_string(),
+                            args: Vec::new(),
+                            working_dir,
+                        });
+                    }
+                }
+
+                let backend_dir = backend_work_dir.join("backend");
+                if !backend_dir.exists() {
+                    continue;
+                }
+
+                let venv_python = Self::venv_python(&backend_work_dir);
+                if venv_python.exists() {
+                    return Ok(Self::python_launch(
+                        venv_python.to_string_lossy().to_string(),
+                        backend_work_dir,
+                    ));
+                }
+
+                // python-build-standalone bundle:
+                //   unix:    resources/python/bin/python3
+                //   windows: resources/python/python.exe
+                let pbs_python = Self::pbs_python(&backend_work_dir);
+                if pbs_python.exists() {
+                    return Ok(Self::python_launch(
+                        pbs_python.to_string_lossy().to_string(),
+                        backend_work_dir,
+                    ));
+                }
+
+                if let Some(system_python) = Self::system_python() {
+                    return Ok(Self::python_launch(system_python, backend_work_dir));
+                }
+            }
+        }
+
+        // 开发模式回退到仓库根目录
+        if let Ok(current_dir) = std::env::current_dir() {
+            if let Some(project_root) = current_dir.parent() {
+                let backend_dir = project_root.join("backend");
+                if backend_dir.exists() {
+                    let venv_python = Self::venv_python(project_root);
+                    if venv_python.exists() {
+                        return Ok(Self::python_launch(
+                            venv_python.to_string_lossy().to_string(),
+                            project_root.to_path_buf(),
+                        ));
+                    }
+                    if let Some(system_python) = Self::system_python() {
+                        return Ok(Self::python_launch(
+                            system_python,
+                            project_root.to_path_buf(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Ok(current_dir) = std::env::current_dir() {
+            let backend_dir = current_dir.join("backend");
+            if backend_dir.exists() {
+                let venv_python = Self::venv_python(&current_dir);
+                if venv_python.exists() {
+                    return Ok(Self::python_launch(
+                        venv_python.to_string_lossy().to_string(),
+                        current_dir,
+                    ));
+                }
+                if let Some(system_python) = Self::system_python() {
+                    return Ok(Self::python_launch(system_python, current_dir));
+                }
+            }
+        }
+
+        Err("找不到可用的 Python 环境或后端代码".to_string())
+    }
+
+    fn exe_name(base: &str) -> String {
+        if cfg!(target_os = "windows") {
+            format!("{}.exe", base)
+        } else {
+            base.to_string()
+        }
+    }
+
+    fn venv_python(root: &std::path::Path) -> PathBuf {
+        if cfg!(target_os = "windows") {
+            root.join("venv").join("Scripts").join("python.exe")
+        } else {
+            root.join("venv").join("bin").join("python")
+        }
+    }
+
+    fn pbs_python(root: &std::path::Path) -> PathBuf {
+        if cfg!(target_os = "windows") {
+            root.join("python").join("python.exe")
+        } else {
+            root.join("python").join("bin").join("python3")
+        }
+    }
+
+    /// First interpreter on PATH that answers `--version`. On Windows `python3`
+    /// is usually the Microsoft Store stub, so prefer plain `python` there.
+    fn system_python() -> Option<String> {
+        let candidates: [&str; 2] = if cfg!(target_os = "windows") {
+            ["python", "python3"]
+        } else {
+            ["python3", "python"]
+        };
+        candidates
+            .iter()
+            .find(|name| Command::new(name).arg("--version").output().is_ok())
+            .map(|name| name.to_string())
+    }
+
+    fn python_launch(program: String, working_dir: PathBuf) -> BackendLaunch {
+        BackendLaunch {
+            program,
+            args: vec!["-m".to_string(), "backend.desktop_main".to_string()],
+            working_dir,
+        }
+    }
+
+    fn backend_binary_name() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "autoclip-backend.exe"
+        } else {
+            "autoclip-backend"
+        }
+    }
+
+    fn read_port_and_health_check(
+        status: Arc<Mutex<BackendStatus>>,
+        process: Arc<Mutex<Option<Child>>>,
+        app_handle: AppHandle,
+    ) {
+        let (stdout, stderr) = {
+            let mut process_guard = process.lock().unwrap();
+            if let Some(child) = process_guard.as_mut() {
+                (child.stdout.take(), child.stderr.take())
+            } else {
+                (None, None)
+            }
+        };
+
+        if let Some(stderr) = stderr {
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().flatten() {
+                    eprintln!("Backend error: {}", line);
+                }
+            });
+        }
+
+        if let Some(stdout) = stdout {
+            let reader = BufReader::new(stdout);
+            let mut emitted_started = false;
+
+            for line in reader.lines().flatten() {
+                println!("Backend output: {}", line);
+
+                if !emitted_started && line.starts_with("PORT=") {
+                    if let Some(port_str) = line.strip_prefix("PORT=") {
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            let backend_status = {
+                                let mut status_guard = status.lock().unwrap();
+                                status_guard.port = port;
+                                BackendStatus {
+                                    is_running: true,
+                                    port,
+                                    pid: status_guard.pid,
+                                    start_time: status_guard.start_time,
+                                }
+                            };
+
+                            let _ = app_handle.emit("backend-started", backend_status);
+                            println!("Backend started on port: {}", port);
+
+                            let status_health = status.clone();
+                            let process_health = process.clone();
+                            thread::spawn(move || {
+                                Self::health_check_loop(status_health, process_health);
+                            });
+
+                            emitted_started = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn health_check_loop(status: Arc<Mutex<BackendStatus>>, process: Arc<Mutex<Option<Child>>>) {
+        loop {
+            thread::sleep(Duration::from_secs(5));
+
+            // 检查状态
+            let should_continue = {
+                let status_guard = status.lock().unwrap();
+                status_guard.is_running
+            };
+
+            if !should_continue {
+                break;
+            }
+
+            // 检查进程是否还在运行
+            let process_exited = {
+                let mut process_guard = process.lock().unwrap();
+                if let Some(ref mut child) = process_guard.as_mut() {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {
+                            // 进程已退出
+                            *process_guard = None;
+                            true
+                        }
+                        Ok(None) => false, // 进程仍在运行
+                        Err(_) => {
+                            // 检查进程状态失败
+                            *process_guard = None;
+                            true
+                        }
+                    }
+                } else {
+                    true
+                }
+            };
+
+            if process_exited {
+                // 更新状态
+                let mut status_guard = status.lock().unwrap();
+                *status_guard = BackendStatus::default();
+                break;
+            }
+
+            // 健康检查
+            let port = {
+                let status_guard = status.lock().unwrap();
+                status_guard.port
+            };
+
+            if port > 0 {
+                let addr = SocketAddr::from(([127, 0, 0, 1], port));
+                if TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_err() {
+                    eprintln!("后端健康检查失败: 端口 {} 不可连接", port);
+                }
+            }
+        }
+    }
+}

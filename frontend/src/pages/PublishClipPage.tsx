@@ -1,0 +1,631 @@
+import { useCClipNavigate as useNavigate } from '../cclip/Navigation'
+import { socialPublishObserved, socialPublishOutcome } from '../analytics/studio'
+import { workflow } from '../analytics/observer'
+import i18n, { t } from '../i18n'
+import { useTranslation } from 'react-i18next'
+import { useEffect, useRef, useState } from 'react'
+import { useLocation, useParams } from 'react-router-dom'
+import { studioApi } from '../features/studio/api'
+import { outputVariantPublishTarget } from '../features/studio/outputVariantPublish'
+import { projectApi } from '../services/api'
+import { Btn, Icon, ProgressLine, Row, Segmented, StatusDot } from '../ui'
+import { openExternalLink } from '../utils/externalLinks'
+import { publishGuideHref } from '../publish/guide'
+import { bilibiliApi, type BilibiliJobView } from '../publish/bilibiliApi'
+import { coverApi, type CoverView } from '../publish/coverApi'
+import { CCLIP_SETTINGS_CLOSED, isCClip } from '../cclip/runtime'
+import { ct } from '../cclip/messages'
+import { isDesktopDownload, saveLocalFile } from '../features/studio/nativeDownload'
+import {
+  buildSchedule, defaultPlatforms, platformLabel, privateExtra, publishDestinations, readApiDetail, renderPreset,
+  type PublishVisibility,
+} from '../publish/uploadPost'
+import { uploadPostApi, type PlatformResult, type PublishJobView, type UploadPostProfile } from '../publish/uploadPostApi'
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+type Track = { kind: 'upload-post' | 'bilibili'; jobId: string }
+
+function coverPlatform(platforms: string[]): 'bilibili' | 'douyin' {
+  if (platforms.includes('bilibili') && platforms.every((p) => p === 'bilibili')) return 'bilibili'
+  if (platforms.some((p) => ['tiktok', 'instagram', 'youtube', 'facebook', 'threads', 'pinterest'].includes(p))) {
+    return 'douyin'
+  }
+  return 'bilibili'
+}
+
+function settleJob(job: PublishJobView | BilibiliJobView, later: boolean): {
+  pending: boolean
+  failed: boolean
+  scheduled: boolean
+  results: PlatformResult[]
+  error?: string
+} {
+  if (job.status === 'failed') {
+    return { pending: false, failed: true, scheduled: false, results: [], error: job.error }
+  }
+  if (job.status === 'queued' || job.status === 'running') {
+    return { pending: true, failed: false, scheduled: false, results: [] }
+  }
+  const direct = 'results' in job && job.results ? job.results : []
+  if (job.status === 'completed' || job.status === 'scheduled') {
+    return { pending: false, failed: false, scheduled: job.status === 'scheduled' || later, results: direct }
+  }
+  if (job.status === 'submitted') {
+    const remote = 'remote' in job ? job.remote : undefined
+    const results = remote?.results || direct
+    if (later) return { pending: false, failed: false, scheduled: true, results }
+    if (!remote?.final) return { pending: true, failed: false, scheduled: false, results }
+    return {
+      pending: false,
+      failed: results.some((item) => !item.success && !item.skipped),
+      scheduled: false,
+      results,
+    }
+  }
+  return { pending: true, failed: false, scheduled: false, results: [] }
+}
+
+function defaultWhen(): string {
+  const date = new Date()
+  date.setDate(date.getDate() + 1)
+  date.setHours(9, 0, 0, 0)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+const PublishClipPage = ({ projectId: suppliedId, clipId: suppliedClip, search: suppliedSearch, embedded = false, coverEnabled = true, onCoverChanged }: { coverEnabled?: boolean; onCoverChanged?: (url?: string) => void; projectId?: string; clipId?: string; search?: string; embedded?: boolean } = {}) => {
+  useTranslation()
+  const { id: routeId = '', clipId: routeClip = '' } = useParams()
+  const projectId = suppliedId || routeId, clipId = suppliedClip || routeClip
+  const studioJobId = /^studio-[a-f0-9]{32}$/.test(clipId) ? clipId.slice(7) : null
+  const location = useLocation()
+  const variantTarget = outputVariantPublishTarget(suppliedSearch ?? location.search)
+  const [studioRevision, setStudioRevision] = useState<number>()
+  const navigate = useNavigate()
+  const runId = useRef(0)
+
+  const [clipTitle, setClipTitle] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [configured, setConfigured] = useState(false)
+  const [biliConfigured, setBiliConfigured] = useState(false)
+  const [profiles, setProfiles] = useState<UploadPostProfile[]>([])
+  const [user, setUser] = useState('')
+  const userRef = useRef(user); userRef.current = user
+  const [selected, setSelected] = useState<string[]>([])
+  const [visibility, setVisibility] = useState<PublishVisibility>('private')
+  const [when, setWhen] = useState<'now' | 'later'>('now')
+  const [whenValue, setWhenValue] = useState(defaultWhen)
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [subtitles, setSubtitles] = useState(true)
+  const [titleCard, setTitleCard] = useState(true)
+  const [savingFile, setSavingFile] = useState(false)
+  const [phase, setPhase] = useState<'idle' | 'running' | 'waiting' | 'done' | 'partial' | 'failed' | 'scheduled'>('idle')
+  const [percent, setPercent] = useState(0)
+  const [error, setError] = useState<string | null>(null)
+  const [results, setResults] = useState<PlatformResult[]>([])
+  const [cover, setCover] = useState<CoverView | null>(null)
+  const [coverTitle, setCoverTitle] = useState('')
+  const [coverSubtitle, setCoverSubtitle] = useState('')
+  const [coverBadge, setCoverBadge] = useState('')
+  const [coverBusy, setCoverBusy] = useState(false)
+  const [coverFormat, setCoverFormat] = useState<string | null>(null)
+  const targetCoverPlatform = () => coverFormat || coverPlatform(selected)
+  const coverRatio = () => ({ bilibili: '1146 / 717', douyin: '9 / 16', xiaohongshu: '3 / 4', youtube_long: '16 / 9' }[targetCoverPlatform()] || '16 / 9')
+  const [coverHint, setCoverHint] = useState<string | null>(null)
+  const coverJob = useRef(0)
+
+  useEffect(() => {
+    const session = ++runId.current
+    let cancelled = false
+    const load = async () => {
+      setLoading(true)
+      try {
+        const [project, cfg, bili] = await Promise.all([
+          projectApi.getProject(projectId),
+          uploadPostApi.getConfig(),
+          bilibiliApi.getConfig(),
+        ])
+        if (cancelled || runId.current !== session) return
+        let clips = project.clips || []
+        if (!clips.length) {
+          try { clips = await projectApi.getClips(projectId) } catch { clips = [] }
+        }
+        const clip = clips.find((item) => item.id === clipId)
+        let nextTitle = clip?.generated_title || clip?.title || ''
+        let coverSlot = 'bilibili'
+        if (studioJobId) {
+          const workspace = await studioApi.get(projectId)
+          if (cancelled || runId.current !== session) return
+          const exported = workspace.jobs.find(job => job.job_id === studioJobId && job.status === 'completed')
+          if (!exported) throw new Error(t('成片尚未完成或不存在，请返回项目重新导出'))
+          if (isCClip && exported.result && exported.result.height > exported.result.width) coverSlot = 'douyin'
+          const preset = workspace.drafts.find(draft => draft.id === exported.draft_id)?.platform_preset
+          if (isCClip && preset === 'xiaohongshu') coverSlot = 'xiaohongshu'
+          if (isCClip && preset === 'youtube_long') coverSlot = 'youtube_long'
+          nextTitle = exported.title
+          setStudioRevision(exported.revision)
+          // An automatic output arrives with its publish kit: start from its copy and cover.
+          const variant = (workspace.output_variants || []).find(item => item.id === variantTarget.uploadPost)
+          if (variant?.post) {
+            nextTitle = variant.post.title || nextTitle
+            setTitle(variant.post.title)
+            setDescription([variant.post.description, variant.post.tags.map(tag => `#${tag}`).join(' ')].filter(Boolean).join('\n\n'))
+          }
+          if (variant && !['bilibili', 'youtube_long', 'original'].includes(variant.strategy_id)) coverSlot = 'douyin'
+          if (isCClip && variant?.strategy_id === 'xiaohongshu') coverSlot = 'xiaohongshu'
+          if (isCClip && variant?.strategy_id === 'youtube_long') coverSlot = 'youtube_long'
+        }
+        if (isCClip) setCoverFormat(coverSlot)
+        setClipTitle(nextTitle)
+        setCoverTitle(nextTitle)
+        setConfigured(cfg.configured)
+        setBiliConfigured(bili.configured)
+        try {
+          const existing = await coverApi.get(projectId, clipId, coverSlot)
+          if (!cancelled && runId.current === session && existing.ok && existing.url) {
+            setCover(existing)
+            onCoverChanged?.(existing.url)
+            if (existing.title) setCoverTitle(existing.title)
+            if (existing.subtitle) setCoverSubtitle(existing.subtitle)
+            if (existing.badge) setCoverBadge(existing.badge)
+          }
+        } catch { /* 没有封面时忽略 */ }
+        let list: UploadPostProfile[] = []
+        let next = ''
+        if (cfg.configured) {
+          const res = await uploadPostApi.profiles()
+          if (cancelled || runId.current !== session) return
+          list = res.profiles || []
+          next = list.some((p) => p.username === cfg.user) ? cfg.user : (list[0]?.username || cfg.user || '')
+        }
+        setProfiles(list)
+        setUser(next)
+        const connected = list.find((p) => p.username === next)?.connected_platforms || []
+        setSelected(defaultPlatforms(publishDestinations(connected, bili.configured)))
+      } catch (err) {
+        if (!cancelled && runId.current === session) setError(readApiDetail(err, t("发布失败")))
+      } finally {
+        if (!cancelled && runId.current === session) setLoading(false)
+      }
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [projectId, clipId, studioJobId])
+
+  useEffect(() => {
+    if (!isCClip) return
+    const refreshError = ct('settingsRefreshFailed')
+    let active = true, revision = 0
+    const refresh = () => {
+      const current = ++revision
+      void (async () => {
+        const [cfg, bili] = await Promise.all([uploadPostApi.getConfig(), bilibiliApi.getConfig()])
+        const list = cfg.configured ? (await uploadPostApi.profiles()).profiles || [] : []
+        if (!active || current !== revision) return
+        const next = list.some(item => item.username === userRef.current) ? userRef.current
+          : list.some(item => item.username === cfg.user) ? cfg.user : list[0]?.username || cfg.user || ''
+        const available = publishDestinations(list.find(item => item.username === next)?.connected_platforms || [], bili.configured)
+        setConfigured(cfg.configured); setBiliConfigured(bili.configured); setProfiles(list); setUser(next)
+        setSelected(selected => selected.filter(platform => available.includes(platform)))
+        setError(value => value === refreshError ? null : value)
+      })().catch(() => {
+        if (active && current === revision) { setConfigured(false); setBiliConfigured(false); setError(refreshError) }
+      })
+    }
+    window.addEventListener(CCLIP_SETTINGS_CLOSED, refresh)
+    return () => { active = false; revision++; window.removeEventListener(CCLIP_SETTINGS_CLOSED, refresh) }
+  }, [projectId, clipId])
+
+  const chooseUser = (next: string) => {
+    setUser(next)
+    const connected = profiles.find((p) => p.username === next)?.connected_platforms || []
+    setSelected(defaultPlatforms(publishDestinations(connected, biliConfigured)))
+  }
+
+  const toggle = (platform: string) => {
+    setSelected((cur) => cur.includes(platform) ? cur.filter((p) => p !== platform) : [...cur, platform])
+  }
+
+  // Covers are on by default: make one as soon as the page is ready so the user sees it instead of an empty box.
+  const autoCover = useRef(false)
+  useEffect(() => {
+    if (!coverEnabled || loading || error || cover || coverBusy || autoCover.current) return
+    autoCover.current = true
+    void generateCover(isCClip)
+  }, [loading, error, cover, coverBusy])
+
+  const generateCover = async (forceLocal = false) => {
+    if (!projectId || !clipId || coverBusy) return
+    const session = ++coverJob.current
+    setCoverBusy(true)
+    setCoverHint(null)
+    try {
+      const started = await coverApi.start(projectId, clipId, {
+        platform: targetCoverPlatform(),
+        title: (coverTitle || title).trim() || undefined,
+        subtitle: coverSubtitle.trim() || undefined,
+        badge: coverBadge.trim() || undefined,
+        ...(forceLocal ? { force_local: true } : {}),
+      })
+      if (coverJob.current !== session) return
+      if ('url' in started && started.url) {
+        setCover(started as CoverView); onCoverChanged?.(started.url || undefined)
+        if (started.warning) setCoverHint(String(started.warning))
+        return
+      }
+      const jobId = (started as { job_id: string }).job_id
+      for (let i = 0; i < 90; i++) {
+        await sleep(1000)
+        if (coverJob.current !== session) return
+        const job = await coverApi.job(jobId)
+        if (job.status === 'completed' && job.result) {
+          setCover(job.result); onCoverChanged?.(job.result.url || undefined)
+          if (job.result.warning) setCoverHint(job.result.warning)
+          return
+        }
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          setCoverHint(job.error || t("封面生成失败，发布时会用截帧"))
+          return
+        }
+      }
+      setCoverHint(t("封面还在生成，发布时会用截帧兜底"))
+    } catch (err) {
+      setCoverHint(readApiDetail(err, t("封面生成失败，发布时会用截帧")))
+    } finally {
+      if (coverJob.current === session) setCoverBusy(false)
+    }
+  }
+
+  const profile = profiles.find((p) => p.username === user)
+  const connected = profile?.connected_platforms || []
+  const destinations = publishDestinations(connected, biliConfigured)
+  const reconnect = (profile?.reconnect_platforms || []).map(platformLabel).join(' · ')
+  const ready = configured || biliConfigured
+  const busy = phase === 'running' || phase === 'waiting' || savingFile
+  const preset = renderPreset(selected)
+  const longYoutube = selected.includes('youtube') && title.trim().length > 100
+
+  const publish = async () => {
+    const overseas = selected.filter((item) => item !== 'bilibili')
+    const sendBili = selected.includes('bilibili')
+    if (!overseas.length && !sendBili) {
+      setError(t("至少选一个平台"))
+      return
+    }
+    if (overseas.length && !user) {
+      setError(t("还没有 profile。到 Upload-Post 创建一个，并连接要发布的账号。"))
+      return
+    }
+    const schedule = buildSchedule(when, whenValue, Intl.DateTimeFormat().resolvedOptions().timeZone, Date.now())
+    if (!schedule.ok) {
+      setError(schedule.reason === 'empty' ? t("选择发出的时间") : t("时间要晚于现在"))
+      return
+    }
+    const session = runId.current
+    const later = when === 'later'
+    setError(null)
+    setResults([])
+    setPhase('running')
+    setPercent(12)
+    const tracks: Track[] = []
+    const telemetryGeneration = workflow.generation()
+    const telemetryEnabled = workflow.active(telemetryGeneration)
+    const observed = new Set<string>()
+    try {
+      if (overseas.length) {
+        const started = await uploadPostApi.start(projectId, clipId, {
+          platforms: overseas,
+          user,
+          preset: renderPreset(overseas),
+          output_variant_id: variantTarget.uploadPost,
+          title: title.trim() || undefined,
+          description: description.trim() || undefined,
+          subtitles,
+          title_card: titleCard,
+          scheduled_date: schedule.scheduled_date,
+          timezone: schedule.timezone,
+          extra: privateExtra(overseas, visibility),
+        })
+        tracks.push({ kind: 'upload-post', jobId: started.job_id })
+      }
+      if (sendBili) {
+        const started = await bilibiliApi.start(projectId, clipId, {
+          output_variant_id: variantTarget.bilibili,
+          title: title.trim() || undefined,
+          description: description.trim() || undefined,
+          subtitles,
+          title_card: titleCard,
+          scheduled_date: schedule.scheduled_date,
+          timezone: schedule.timezone,
+          visibility,
+        })
+        tracks.push({ kind: 'bilibili', jobId: started.job_id })
+      }
+    } catch (err) {
+      if (!tracks.length) {
+        setError(readApiDetail(err, t("发布失败")))
+        setPhase('failed')
+        return
+      }
+      setError(readApiDetail(err, t("发布失败")))
+    }
+    if (runId.current !== session) return
+    const deadline = Date.now() + 30 * 60 * 1000
+    let waitMs = 2000
+    let sawPending = false
+    while (Date.now() < deadline) {
+      if (runId.current !== session) return
+      await sleep(waitMs)
+      if (runId.current !== session) return
+      let pending = false
+      let failed = false
+      let scheduled = false
+      let message = ''
+      const merged: PlatformResult[] = []
+      for (const track of tracks) {
+        const job = track.kind === 'upload-post'
+          ? await uploadPostApi.job(track.jobId)
+          : await bilibiliApi.job(track.jobId)
+        if (runId.current !== session) return
+        const settled = settleJob(job, later)
+        if (!settled.pending && !observed.has(track.jobId)) {
+          observed.add(track.jobId)
+          if (telemetryEnabled) socialPublishObserved(telemetryGeneration, {
+            ...workflow.context(projectId, studioJobId || undefined), source_type: studioJobId ? 'studio' : 'legacy', gateway: track.kind,
+            outcome: socialPublishOutcome(job.status, settled.scheduled, settled.results),
+          })
+        }
+        if (settled.pending) pending = true
+        if (settled.failed) failed = true
+        if (settled.scheduled) scheduled = true
+        if (settled.error) message = settled.error
+        merged.push(...settled.results)
+      }
+      setResults(merged)
+      if (pending) {
+        sawPending = true
+        setPhase(merged.length ? 'waiting' : 'running')
+        setPercent(merged.length ? 72 : 36)
+        waitMs = merged.length ? 10000 : 2000
+        continue
+      }
+      setPercent(100)
+      if (message) setError(message)
+      if (failed && !merged.length) setPhase('failed')
+      else if (failed) setPhase('partial')
+      else if (scheduled) setPhase('scheduled')
+      else setPhase('done')
+      return
+    }
+    setPhase(sawPending ? 'waiting' : 'running')
+    setError(sawPending ? t("已提交，正在等各平台结果") : t("正在渲成片并提交"))
+  }
+
+  const downloadFile = async () => {
+    if (savingFile || phase === 'running' || phase === 'waiting') return
+    setSavingFile(true)
+    setError(null)
+    setPercent(8)
+    try {
+      const started = await projectApi.startClipExport(projectId, clipId, {
+        preset: studioJobId ? 'original' : preset,
+        subtitles,
+        title_card: titleCard,
+      })
+      for (let i = 0; i < 180; i++) {
+        await sleep(1000)
+        const job = await projectApi.getExportJob(projectId, started.job_id)
+        setPercent(job.percent ?? 20)
+        if (job.status === 'completed') {
+          await projectApi.downloadExport(projectId, started.job_id)
+          setPercent(100)
+          return
+        }
+        if (job.status === 'failed') {
+          setError(job.error || t("导出失败"))
+          return
+        }
+      }
+      setError(t("导出超时，请稍后在输出目录查看"))
+    } catch (err) {
+      setError(readApiDetail(err, t("导出失败")))
+    } finally {
+      setSavingFile(false)
+    }
+  }
+
+  const coverEditor = coverEnabled ? (
+    <Row stack label={t("封面")} hint={t("生图失败或未生成时，投稿会自动截帧，不会卡住发布。")}>
+      {isCClip && <Segmented size="sm" ariaLabel={ct('coverAspect')} value={targetCoverPlatform()} onChange={value => { setCoverFormat(value); setCover(null); setCoverHint(null) }} options={[{ value: 'douyin', label: '9:16' }, { value: 'xiaohongshu', label: '3:4' }, { value: 'bilibili', label: 'Bilibili 1146×717' }, { value: 'youtube_long', label: '16:9' }]} />}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}>
+                <div style={{
+                  width: '100%',
+                  maxWidth: 360,
+                  aspectRatio: isCClip ? coverRatio() : targetCoverPlatform() === 'douyin' ? '9 / 16' : '16 / 9',
+                  background: 'var(--ac-thumb)',
+                  borderRadius: 12,
+                  overflow: 'hidden',
+                  border: '1px solid var(--ac-line)',
+                }}>
+                  {cover?.url ? (
+                    <img src={cover.url} alt={t("封面")} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                  ) : (
+                    <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: 'var(--ac-muted)', fontSize: 13 }}>
+                      {coverBusy ? t("正在生成封面") : t("还没有封面")}
+                    </div>
+                  )}
+                </div>
+                <input className="ac-input" aria-label={t("封面标题")} placeholder={t("封面标题")} value={coverTitle} onChange={(e) => setCoverTitle(e.target.value)} />
+                <input className="ac-input" aria-label={t("封面副标题")} placeholder={t("封面副标题")} value={coverSubtitle} onChange={(e) => setCoverSubtitle(e.target.value)} />
+                <input className="ac-input" aria-label={t("封面角标")} placeholder={t("封面角标")} value={coverBadge} onChange={(e) => setCoverBadge(e.target.value)} />
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <Btn size="sm" loading={coverBusy} disabled={busy} onClick={() => void generateCover()}>
+                    {cover?.url ? t("重新生成封面") : t("生成封面")}
+                  </Btn>
+                  <Btn size="sm" onClick={() => navigate('/settings?section=cover')}>{t("封面设置")}</Btn>
+                  {isCClip && <Btn size="sm" disabled={coverBusy || busy} onClick={() => void generateCover(true)}>{ct('localCover')}</Btn>}
+                  {isCClip && cover?.url && <a className="ac-btn ac-btn--sm" href={cover.url} download onClick={async event => {
+                    if (!isDesktopDownload()) return
+                    event.preventDefault()
+                    try {
+                      const url = new URL(cover.url!, window.location.origin)
+                      if (url.origin !== window.location.origin || !url.pathname.startsWith('/api/v1/')) throw new Error('invalid_download')
+                      await saveLocalFile(url.pathname.slice('/api/v1'.length) + url.search)
+                      setCoverHint(t('已保存到下载文件夹'))
+                    } catch { setCoverHint(t('下载失败，请稍后重试')) }
+                  }}>{ct('downloadCover')}</a>}
+                </div>
+                {coverHint && <p style={{ margin: 0, color: 'var(--ac-sub)', fontSize: 12.5 }}>{coverHint}</p>}
+                {cover?.method === 'frame' && !coverHint && (
+                  <p style={{ margin: 0, color: 'var(--ac-sub)', fontSize: 12.5 }}>{t("当前是截帧封面")}</p>
+                )}
+              </div>
+            </Row>
+  ) : null
+
+  const summary = phase === 'done'
+    ? t("各平台都已完成")
+    : phase === 'partial'
+      ? t("有的平台没有发出去")
+      : phase === 'scheduled'
+        ? t("已排期。到点会自动发出，可以关掉应用。")
+        : phase === 'waiting'
+          ? t("已提交，正在等各平台结果")
+          : phase === 'running'
+            ? t("正在渲成片并提交")
+            : null
+
+  return (
+    <div className={`ac-page ac-page--narrow${embedded ? ' cclip-embedded-publish' : ''}`}>
+      <header>
+        <button className="ac-back" onClick={() => navigate(`/project/${projectId}`)}>
+          <Icon.Back />{t("项目")}
+        </button>
+        <h1 className="ac-title">{isCClip ? ct("coverAndPublish") : t("发布")}</h1>
+        <div className="ac-meta">
+          <span>{clipTitle || t("切片")}</span>
+          <span className="dot" />
+          <a href={publishGuideHref(i18n.language)} onClick={(e) => { e.preventDefault(); void openExternalLink(publishGuideHref(i18n.language)) }} style={{ color: 'var(--ac-accent)' }}>{t("操作教程")}</a>
+        </div>
+      </header>
+
+      <div className="ac-rows" style={{ marginTop: 28 }}>
+        {loading && <div style={{ padding: '28px 0' }}><StatusDot tone="accent" label={t("还在处理中")} /></div>}
+        {!loading && !ready && !error && (
+          <div className={isCClip ? "cclip-publish-note" : "ac-empty"} style={{ marginTop: 8 }}>
+            <b>{isCClip ? ct("publishOptional") : t("还没有配置发布账号。到设置里填一次即可。")}</b>
+            <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <Btn size="sm" variant="cta" onClick={() => navigate('/settings?section=publish')}>{t("去设置")}</Btn>
+              <Btn size="sm" onClick={() => void openExternalLink(publishGuideHref(i18n.language))}>{t("操作教程")}<Icon.External size={12} /></Btn>
+            </div>
+          </div>
+        )}
+        {isCClip && !loading && !ready && !error && coverEditor}
+        {!loading && ready && (
+          <>
+            {profiles.length > 1 && (
+              <Row label={t("默认账号")}>
+                <Segmented size="sm" ariaLabel={t("默认账号")} value={user} onChange={chooseUser}
+                  options={profiles.map((p) => ({ value: p.username, label: p.username }))} />
+              </Row>
+            )}
+            <Row label={t("何时")}>
+              <Segmented size="sm" ariaLabel={t("何时")} value={when} onChange={setWhen}
+                options={[{ value: 'now', label: t("现在发") }, { value: 'later', label: t("定时") }]} />
+            </Row>
+            {when === 'later' && (
+              <Row label={t("选择发出的时间")} hint={selected.includes('bilibili') ? t("B 站定时要晚于现在两小时。") : undefined}>
+                <input className="ac-input" style={{ width: 220 }} type="datetime-local" aria-label={t("选择发出的时间")} value={whenValue} onChange={(e) => setWhenValue(e.target.value)} />
+              </Row>
+            )}
+            {destinations.length > 0 && (
+              <Row label={t("选择要发布的平台")} stack>
+                <div className="ac-seg ac-seg--sm" role="group" aria-label={t("选择要发布的平台")}>
+                  {destinations.map((p) => (
+                    <button key={p} type="button" aria-pressed={selected.includes(p)} onClick={() => toggle(p)} disabled={busy}>{platformLabel(p)}</button>
+                  ))}
+                </div>
+              </Row>
+            )}
+            {configured && profiles.length > 0 && !connected.length && !biliConfigured && !reconnect && (
+              <p style={{ color: 'var(--ac-sub)', fontSize: 13 }}>{t("这个账号还没有连接平台。")}</p>
+            )}
+            {reconnect && (
+              <p style={{ color: 'var(--ac-sub)', fontSize: 13, margin: '8px 0 0' }}>{t("需要重新连接：{{platforms}}", { platforms: reconnect })}</p>
+            )}
+            <Row label={t("可见范围")} hint={t("默认先发到自己看得到的地方。公开会直接出现在账号上。")}>
+              <Segmented size="sm" ariaLabel={t("可见范围")} value={visibility} onChange={setVisibility}
+                options={[{ value: 'private', label: t("仅自己") }, { value: 'public', label: t("公开") }]} />
+            </Row>
+            <Row wide label={t("标题")} hint={longYoutube ? t("YouTube 标题超过 100 字时会自动缩短。") : t("不填就用切片标题。")}>
+              <input className="ac-input" aria-label={t("标题")} value={title} onChange={(e) => setTitle(e.target.value)} />
+            </Row>
+            <Row wide label={t("描述")} hint={t("YouTube、LinkedIn、Facebook、Pinterest 和 B 站会用到。")}>
+              <textarea className="ac-input ac-textarea" style={{ minHeight: 88 }} aria-label={t("描述")} value={description} onChange={(e) => setDescription(e.target.value)} />
+            </Row>
+            {coverEditor}
+          </>
+        )}
+        {!loading && !studioJobId && (
+          <>
+            <Row label={t("字幕")} hint={t("把这段的字幕压进画面")}>
+              <Segmented size="sm" ariaLabel={t("字幕")} value={subtitles ? 'on' : 'off'} onChange={(v) => setSubtitles(v === 'on')}
+                options={[{ value: 'on', label: t("显示") }, { value: 'off', label: t("不显示") }]} />
+            </Row>
+            <Row label={t("片头标题")} hint={t("片头约 4 秒显示标题文字")}>
+              <Segmented size="sm" ariaLabel={t("片头标题")} value={titleCard ? 'on' : 'off'} onChange={(v) => setTitleCard(v === 'on')}
+                options={[{ value: 'on', label: t("显示") }, { value: 'off', label: t("不显示") }]} />
+            </Row>
+          </>
+        )}
+      </div>
+
+      {!loading && (
+        <p className="ac-sub" style={{ marginTop: 16 }}>
+          {studioJobId ? t('发布已导出的 V{{revision}} 成片，保留画幅、文字和声音。需要修改时，请返回编辑器另行导出。', { revision: studioRevision ?? '—' }) : t("成片跟着账号走：有竖屏账号就渲成 9:16，只发 B 站时按横屏，只有横屏海外账号时按原画。")}
+        </p>
+      )}
+      {busy && <div style={{ marginTop: 16 }}><ProgressLine percent={percent} /></div>}
+      {summary && <p style={{ marginTop: 12, color: 'var(--ac-sub)', fontSize: 13 }}>{summary}</p>}
+      {results.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          {results.map((r) => {
+            const tone = r.skipped ? 'muted' : r.success ? 'ok' : 'error'
+            const note = r.skipped
+              ? t("该平台未连接，已跳过")
+              : r.fallback_to_inbox
+                ? t("进了 TikTok 收件箱，需要在 App 里再发一次")
+                : (r.error || r.message || '')
+            return (
+              <div key={r.platform} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', padding: '10px 0', borderTop: '1px solid var(--ac-line)' }}>
+                <StatusDot tone={tone} label={<>{platformLabel(r.platform || '')}{note ? <span style={{ color: 'var(--ac-muted)' }}> · {note}</span> : null}</>} />
+                {r.url && (
+                  <a href={r.url} onClick={(e) => { e.preventDefault(); void openExternalLink(r.url!) }} style={{ color: 'var(--ac-accent)', fontSize: 13 }}>{t("打开链接")}</a>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {error && <p style={{ marginTop: 12, color: 'var(--ac-error)', fontSize: 13 }}>{error}</p>}
+
+      {!loading && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 28 }}>
+          <Btn loading={savingFile} disabled={phase === 'running' || phase === 'waiting'} onClick={() => void downloadFile()}>{t("下载成片")}</Btn>
+          {ready && phase !== 'done' && phase !== 'partial' && phase !== 'scheduled' && (
+            <Btn variant="cta" loading={phase === 'running' || phase === 'waiting'} disabled={!selected.length || savingFile} onClick={() => void publish()}>
+              {when === 'later' ? t("排期发布") : t("开始发布")}
+            </Btn>
+          )}
+          {(phase === 'done' || phase === 'partial' || phase === 'scheduled') && (
+            <Btn onClick={() => navigate(`/project/${projectId}/publish`)}>{t("查看发布记录")}</Btn>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default PublishClipPage

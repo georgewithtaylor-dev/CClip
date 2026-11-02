@@ -1,0 +1,59 @@
+/* AutoClip app surfaces and controls, shared by both workbench editing modes. */
+html[data-cclip-app] {
+  --wb-bg: var(--ac-bg);
+  --wb-card: var(--ac-card);
+  --wb-soft: var(--ac-line-2);
+  --wb-line: var(--ac-line);
+  --wb-line-strong: color-mix(in srgb, var(--ac-sub) 30%, var(--ac-card));
+  --wb-ink: var(--ac-ink);
+  --wb-sub: var(--ac-sub);
+  --wb-accent: var(--ac-accent);
+  --wb-selected: color-mix(in srgb, var(--ac-accent) 10%, var(--ac-card));
+  --wb-hover: color-mix(in srgb, var(--ac-ink) 5%, transparent);
+}
+html[data-cclip-app][data-theme="light"] .wb-app { color-scheme: light; }
+html[data-cclip-app][data-theme="dark"] .wb-app { color-scheme: dark; }
+html[data-cclip-app] .wb-app { font-family: var(--ac-font-sans); }
+html[data-cclip-app] .wb-button-accent,
+html[data-cclip-app] .wb-local-action,
+html[data-cclip-app] .cclip-new-editor button,
+html[data-cclip-app] .wb-app .ac-btn--cta {
+  color: var(--ac-cta-fg); background: var(--ac-cta-bg); border-color: var(--ac-cta-bg);
+}
+html[data-cclip-app] .wb-button-accent:not(:disabled):hover,
+html[data-cclip-app] .wb-local-action:not(:disabled):hover { background: var(--ac-cta-bg); opacity: .88; }
+html[data-cclip-app] .wb-button-accent:disabled { color: var(--ac-sub); background: var(--ac-line-2); border-color: var(--ac-line); opacity: .7; }
+html[data-cclip-app] .wb-task-group.is-active .wb-local-action { color: var(--ac-cta-fg); background: var(--ac-cta-bg); border-color: var(--ac-cta-bg); }
+html[data-cclip-app] .wb-rail-button.is-active,
+html[data-cclip-app] .wb-tab.is-active { color: var(--ac-ink); background: var(--ac-line-2); }
+html[data-cclip-app] .wb-tool-button[aria-pressed="true"] { color: var(--ac-ink); background: var(--wb-selected); }
+html[data-cclip-app] .wb-clip-number,
+html[data-cclip-app] .wb-clip-source-label,
+html[data-cclip-app] .cclip-output-origin,
+html[data-cclip-app] .cclip-output-number { color: color-mix(in srgb, var(--clip-color, var(--ac-accent)) 48%, var(--ac-ink)); }
+html[data-cclip-app] .wb-workspace-layout .wb-clip-number { color: var(--clip-color); background: #1a1a19e6; }
+html[data-cclip-app] .wb-transcript-panel .wb-transcript-row.is-checked { background: color-mix(in srgb, var(--clip-color, var(--ac-accent)) 16%, var(--ac-card)); border-left-color: var(--clip-color, var(--ac-accent)); }
+html[data-cclip-app] .wb-sentence-bookmark:hover,
+html[data-cclip-app] .wb-sentence-bookmark.is-marked { color: var(--ac-ink); }
+html[data-cclip-app] .wb-library-clip.is-selected { border-color: var(--clip-color, var(--ac-accent)); }
+html[data-cclip-app] .wb-workspace-layout .wb-subtitle-block { color: var(--ac-ink); background: color-mix(in srgb, var(--ac-warn) 15%, var(--ac-card)); border-color: color-mix(in srgb, var(--ac-warn) 42%, var(--ac-line)); }
+html[data-cclip-app] .wb-app .wb-task-cancel,
+html[data-cclip-app] .wb-clip-delete:hover,
+html[data-cclip-app] .cclip-output-delete:hover { color: var(--ac-error); background: color-mix(in srgb, var(--ac-error) 10%, var(--ac-card)); border-color: var(--ac-error); }
+html[data-cclip-app] .cclip-clip-dock > .cclip-editor-notice { color: var(--ac-ink); background: var(--ac-card); border-color: var(--ac-line-strong, var(--ac-sub)); box-shadow: var(--ac-shadow); }
+.cclip-settings-dialog { position: relative; width: min(1120px, calc(100vw - 48px)); padding: 24px; display: flex; flex-direction: column; overflow: hidden; }
+.cclip-settings-dialog > h3, .cclip-settings-dialog > .ac-dialog-foot { flex-shrink: 0; }
+.cclip-settings-dialog > div:not(.ac-dialog-foot) { flex: 1; min-height: 0; overflow: auto; padding-right: 8px; }
+.cclip-settings-close { position: absolute; top: 14px; right: 14px; font-size: 24px; width: 32px; padding: 0; }
+.cclip-settings-page { color: var(--ac-ink); }
+.cclip-settings-page .ac-settings { grid-template-columns: 144px minmax(0, 1fr); gap: 28px; }
+.cclip-settings-page .ac-settings-nav { top: 0; }
+.cclip-settings-page .ac-settings-body { max-width: none; }
+.cclip-settings-dialog > .ac-dialog-foot { justify-content: flex-end; }
+.cclip-cover-option > select { width: 100%; }
+@media(max-width: 720px) {
+  .cclip-settings-dialog { width: calc(100vw - 20px); padding: 18px; max-height: calc(100dvh - 20px); }
+  .cclip-settings-page .ac-settings { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .cclip-settings-page .ac-settings-nav { position: static; flex-direction: row; flex-wrap: wrap; }
+  .cclip-settings-page .ac-row { flex-wrap: wrap; gap: 12px; }
+}
