@@ -8,13 +8,16 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 ![Windows x64](https://img.shields.io/badge/Windows-x64%20portable-blue)
-![macOS](https://img.shields.io/badge/macOS-validation%20pending-lightgrey)
 
 </div>
 
 [简体中文](README.md) · [English](README-EN.md) · [日本語](README-JA.md) · [한국어](README-KO.md) · [Español](README-ES.md) · [Português](README-PT.md) · [Русский](README-RU.md) · [Français](README-FR.md)
 
 CClip 基于 [AutoClip](https://github.com/zhouxiaoka/autoclip) 二次开发，面向直播结束后的录播整理：从长视频找到精彩内容，再通过时间轴、字幕和波形精剪，制作适合不同平台的视频与封面。
+
+**[下载 Windows x64 免安装 ZIP](https://github.com/georgewithtaylor-dev/CClip/releases/download/cclip-win-x64-preview-2026.11.02/CClip-Windows-x64-portable.zip)** · [查看版本说明与校验文件](https://github.com/georgewithtaylor-dev/CClip/releases/tag/cclip-win-x64-preview-2026.11.02)
+
+当前仅支持 **Windows x64 免安装版**。完整解压后双击 `CClip/CClip.exe`，无需运行安装程序。
 
 ## 功能一览
 
@@ -41,15 +44,14 @@ CClip 基于 [AutoClip](https://github.com/zhouxiaoka/autoclip) 二次开发，�
 
 ## 当前版本与下载
 
-本次为 CClip 首次公开源码。Windows x64 免安装版本已完成本地试用验收；**此源码仓库提交不附带安装包，也不代表 macOS 已验收**。后续可下载包会放在 [Releases](https://github.com/georgewithtaylor-dev/CClip/releases)，不要把上游 AutoClip 安装包当作 CClip。
+首个 Windows x64 免安装测试版已完成本地试用验收，程序包放在 [Releases](https://github.com/georgewithtaylor-dev/CClip/releases/tag/cclip-win-x64-preview-2026.11.02) 的 **Assets** 中：下载 `CClip-Windows-x64-portable.zip`。旁边的 `.sha256` 文件可用于校验下载完整性。GitHub 自动提供的 **Source code (zip)** 是源码，不是免安装程序。
 
 程序版本与构建信息可在 **设置 → 应用** 查看，源码版本以本仓库提交记录为准。
 
 | 平台 | 当前状态 |
 | --- | --- |
-| Windows x64 | 本地免安装包实测通过；完整离线包解压约 1.54 GiB |
-| Intel Mac | 首版兼容目标；已有原生构建脚本，尚未完成真机验收 |
-| Apple Silicon Mac | 兼容目标；尚未完成真机验收 |
+| Windows x64 | 当前支持，免安装 ZIP；压缩约 712 MiB，解压约 1.54 GiB |
+| macOS / Windows ARM64 / Linux | 本版不支持，不提供可用性保证 |
 
 完整包携带 Python、媒体工具、浏览器运行组件和本地识别依赖，**尚未达到解压后 500 MB 的目标**。源码仓库不包含这些运行时和私人测试数据。
 

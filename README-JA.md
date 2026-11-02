@@ -6,7 +6,9 @@
 
 AutoClip を基に、元動画の全体タイムライン、字幕編集、手動・AI切り抜き、波形、取り消し、表紙テンプレート、各プラットフォーム向け出力を備えます。
 
-Windows x64 のポータブル版はローカル利用テスト済みです。初回公開はソースのみで、配布バイナリは含みません。Intel・Apple Silicon Mac は未検証です。オフライン版は展開後約1.54 GiBで、500 MBの目標は未達です。
+**[Windows x64 ポータブル ZIP をダウンロード](https://github.com/georgewithtaylor-dev/CClip/releases/download/cclip-win-x64-preview-2026.11.02/CClip-Windows-x64-portable.zip)** · [Release](https://github.com/georgewithtaylor-dev/CClip/releases/tag/cclip-win-x64-preview-2026.11.02)
+
+現在の対応は **Windows x64 ポータブル版のみ**です。Releases のアプリ ZIP を取得してください。自動生成の Source code (zip) は実行用パッケージではありません。本版は macOS と Windows ARM64 に対応しません。オフライン版は展開後約 1.54 GiB で、500 MB の目標は未達です。
 
 ZIPを完全に展開し、CClip/CClip.exeを実行します。resourcesを保持してください。AIは自身のAPI枠を使用します。設定の保存先で出力先変更と未使用の確認済み一時キャッシュ削除ができます。元動画・プロジェクト・字幕・モデル・完成動画は保持します。
 

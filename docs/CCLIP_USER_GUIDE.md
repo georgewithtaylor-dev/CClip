@@ -1,5 +1,7 @@
 # CClip 使用与清理
 
+当前仅支持 Windows x64 免安装版。从 [Releases](https://github.com/georgewithtaylor-dev/CClip/releases/tag/cclip-win-x64-preview-2026.11.02) 的 Assets 下载程序 ZIP；Source code (zip) 只是源码。
+
 ## 开始剪辑
 
 完整解压免安装包后运行 `CClip.exe`；`resources` 是程序必需组件，不能单独删除其中的文件。首页左侧导入录播，右侧打开已保存项目。编辑中一个项目只使用一个原片。

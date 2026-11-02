@@ -3,6 +3,7 @@
 - [使用与存储清理](CCLIP_USER_GUIDE.md)
 - [开发与构建](CCLIP_DEVELOPMENT.md)
 - [验证范围与已知限制](CCLIP_VALIDATION.md)
+- [Windows 免安装发布与下载校验](CCLIP_RELEASE.md)
 - [本地处理与外部接口](PRIVACY.md)
 - [上游 CLI/MCP 兼容入口](CLI_AND_MCP.md)
 - [贡献说明](../CONTRIBUTING.md)

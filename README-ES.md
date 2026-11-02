@@ -6,7 +6,9 @@
 
 Basado en AutoClip: línea de tiempo completa, subtítulos editables, recortes manuales o con IA, forma de onda, deshacer, portadas locales y ajustes por plataforma.
 
-La versión portable Windows x64 superó la aceptación local. Esta primera publicación de código no incluye binarios. Falta validar Intel Mac y Apple Silicon. El paquete completo ocupa unos1.54 GiB extraído; la meta de500 MB no se ha alcanzado.
+**[Descargar ZIP portable para Windows x64](https://github.com/georgewithtaylor-dev/CClip/releases/download/cclip-win-x64-preview-2026.11.02/CClip-Windows-x64-portable.zip)** · [Release](https://github.com/georgewithtaylor-dev/CClip/releases/tag/cclip-win-x64-preview-2026.11.02)
+
+Compatibilidad actual: **solo Windows x64 portable**. Descarga el ZIP de la aplicación desde Releases; Source code (zip), generado automáticamente, no es el programa. Esta versión no admite macOS ni Windows ARM64. El paquete extraído ocupa unos 1.54 GiB; la meta de 500 MB sigue pendiente.
 
 Extrae todo el ZIP y ejecuta CClip/CClip.exe manteniendo resources al lado. La IA usa tu propia cuota API. En Ajustes → Almacenamiento puedes cambiar carpetas y limpiar temporales inactivos verificados. Se conservan proyectos, originales, subtítulos, modelos y vídeos terminados.
 
